@@ -1,0 +1,74 @@
+##Define a dataframe for the flight dataset at wasbs://downloads@smithbc.blob.core.windows.net/flights/flights.csv and the airport dataset at wasbs://downloads@smithbc.blob.core.windows.net/flights/airports.csv. Refer to previous labs to determine the schema for each of these files.
+
+from pyspark.sql.types import *
+##creating flight schema as 'a' table
+flights_schema = StructType([
+  StructField('month', IntegerType()),
+  StructField('dayofmonth', IntegerType()),
+  StructField('dayofweek', IntegerType()),
+  StructField('deptime', IntegerType()),
+  StructField('arrtime', IntegerType()),
+  StructField('uniquecarrier', StringType()),
+  StructField('flightnum', IntegerType()),
+  StructField('tailnum', StringType()),
+  StructField('elapsedtime', IntegerType()),
+  StructField('airtime', IntegerType()),
+  StructField('arrdelay', IntegerType()),          
+  StructField('depdelay', IntegerType()),
+  StructField('origin', StringType()),
+  StructField('dest', StringType()),
+  StructField('distance', IntegerType()),
+  StructField('taxiin', IntegerType()),
+  StructField('taxiout', IntegerType()),
+  StructField('cancelled', IntegerType()),
+  StructField('cancellationcode', StringType()),
+  StructField('diverted', IntegerType()),  
+  ])
+
+flights = (
+  spark
+    .read
+    .csv(
+      FILE_STORE_ROOT + '/flights/flights.csv', 
+      schema=flights_schema
+      )
+)
+
+flights.createOrReplaceTempView('flights')
+display(flights)
+
+##creating airport schema as 'b' table
+airports_schema = StructType([
+  StructField('code', StringType()),
+  StructField('airport', StringType()),
+  StructField('city', StringType()),
+  StructField('state', StringType()),
+  StructField('country', StringType()),
+  StructField('latitude', FloatType()),
+  StructField('longitude', FloatType())
+])
+
+airports = (
+  spark
+    .read
+    .csv(
+      FILE_STORE_ROOT + '/flights/airports.csv', 
+      schema=airports_schema,
+      header=True
+      )
+  )
+airports.createOrReplaceTempView('airports')
+display(airports)
+
+
+##Using a SQL SELECT statement, identify the destination airports with the most arrivals (for the period represented by the flight dataset). Provide a friendly name for the destination airport.
+%sql
+SELECT
+  a.dest as airport_code,
+  b.airport as airport_name,
+  COUNT(*) as arriving_flights
+FROM flights a
+LEFT OUTER JOIN airports b
+  ON a.dest=b.code
+GROUP BY a.dest, b.airport
+ORDER BY arriving_flights DESC
