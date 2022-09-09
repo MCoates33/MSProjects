@@ -1,0 +1,642 @@
+---
+title: "Beating the Casinos by Predicting Home Win Probability in the NFL"
+author: \begin{small} Matt Coates 314102189, Daniel Guerrero 48592068, Maggie Puckett 48661722, Calvin Skalla 48704960, Julio Suriano 48682730 \end{small}
+date: "12/1/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+#Load necessary packages
+library(dplyr)
+library(tidyr)
+library(nflfastR)
+library(e1071)
+library(ggplot2)
+library(ggpubr)
+library(kableExtra)
+library(ggimage)
+library(magick)
+library(stringr)
+library(splitstackshape)
+```
+
+
+```{r, include=FALSE, eval=FALSE, message=FALSE, warning=FALSE}
+#load the data
+raw <- load_pbp(2010:2019) %>% 
+  select(game_id, desc, home_team, away_team, season_type,
+         week, posteam, game_date, game_seconds_remaining, quarter_end, 
+         drive, qtr, time, penalty_yards, start_time, drive_time_of_possession, 
+         away_score, home_score, result, fumble, interception, 
+         field_goal_result, third_down_converted, third_down_failed,
+         fourth_down_converted, fourth_down_failed, surface, roof, 
+         penalty_type, penalty_team, drive_start_yard_line)
+
+#Change drive time of possession to numeric to be aggregated
+raw$drive_time_of_possession <- sapply(strsplit(raw$drive_time_of_possession,":"),
+                                        function(x) {
+                                          x <- as.numeric(x)
+                                          x[1]+x[2]/60
+                                        }
+)
+
+#Group the play by plays into drives from the games
+top1 <- raw %>% 
+  group_by(game_id, drive, posteam) %>% 
+  summarize(TOP = mean(na.omit(drive_time_of_possession), na.rm = TRUE)) %>%
+  drop_na(posteam)
+
+#Sum up the drive times for time of possession per game
+top2 <- top1 %>% 
+  group_by(game_id, posteam) %>% 
+  summarize(TOP = round(sum(TOP, na.rm = TRUE), 2))
+
+
+#Deriving penalty yards for home team
+raw$penalty_yards[is.na(raw$penalty_yards)] <- 0
+
+UNQ_GAM <- data.frame(unique(raw$game_id, incomparables = FALSE))
+colnames(UNQ_GAM) <- "game_id"
+
+pen1 <- raw %>% 
+  group_by(game_id, home_team, penalty_team) %>% 
+  filter(home_team == penalty_team) %>% 
+  summarize(Pen_Yards = sum(penalty_yards)) %>% 
+  drop_na()
+
+strag <- setdiff(UNQ_GAM, pen1[,1])
+
+colnames(strag) = "game_id"
+strag2 <- cbind(strag, "Pen_Yards" = 0)
+
+pen2 <- rbind(pen1, strag2) 
+pen2 <- pen2[order(pen2$game_id),]
+
+
+#Deriving turnovers for home team
+raw$interception[is.na(raw$interception)] <- 0
+raw$fumble[is.na(raw$fumble)] <- 0
+
+TO1 <- raw %>% 
+  group_by(game_id, posteam) %>% 
+  summarize(Fumbles = sum(fumble),
+            Interceptions = sum(interception)) %>% 
+  drop_na() %>% 
+  mutate(TO = Fumbles + Interceptions)
+
+#Deriving third & fourth down conversion rate
+third <- raw %>% 
+  drop_na(third_down_converted, posteam) %>% 
+  group_by(game_id, posteam) %>%
+  summarize(third_con = sum(third_down_converted),
+            third_fail = sum(third_down_failed))
+
+fourth <- raw %>% 
+  drop_na(fourth_down_converted, posteam) %>% 
+  group_by(game_id, posteam) %>%
+  summarize(fourth_con = sum(fourth_down_converted),
+            fourth_fail = sum(fourth_down_failed))
+
+
+#Penalty types
+#levels(as.factor(raw$penalty_type))
+Disc_Pen <- raw %>% filter(as.factor(penalty_type) %in% c("Neutral Zone Infraction", "Defensive Offside", 
+  "Delay of Game", "False Start", "Illegal Motion", "Taunting", "Unnecessary Roughness", 
+  "Illegal Substitution", "Illegal Shift", "Unsportsmanlike Conduct", 
+  "Defensive Too Many Men on Field", "Offensive Too Many Men on Field", "Encroachment"))
+
+Pen_Type <- Disc_Pen %>% 
+  group_by(game_id, penalty_team, home_team) %>% 
+  summarise(UnDisc_Pen = n()) %>% 
+  filter(home_team == penalty_team)
+
+stragglers <- setdiff(UNQ_GAM, Pen_Type[,1])
+
+colnames(stragglers) = "game_id"
+stragglers2 <- cbind(stragglers, "UnDisc_Pen" = 0)
+
+Pen_Type2 <- rbind(Pen_Type, stragglers2) 
+Pen_Type2 <- Pen_Type2[order(Pen_Type2$game_id),]
+
+
+#Deriving Game per Row
+raw2 <- raw %>%
+  arrange(game_id) %>% 
+  group_by(game_id) %>% 
+  summarise_all(last)
+
+
+#Create game situation for each team
+raw3 <- rbind(raw2, raw2)
+
+#Sort by game ID so TOP is binded on correctly
+raw4 <- raw3[order(raw3$game_id),]
+
+#Add on TOP to the gamelogs
+nfldata <- cbind(raw4[,c(1, 3:6, 15, 19, 27, 28)], top2[,2:3], 
+                 TO1[,5], third[,3:4], fourth[,3:4]) 
+
+
+#TO forced
+TO_f <- TO1 %>%
+  arrange(game_id) %>% 
+  group_by(game_id) %>% 
+  summarise_all(first)
+
+TO_f2 <- TO_f %>% 
+  transmute(TO_Forced = TO)
+
+
+#Gather only TOP for the home teams
+nfldata2 <- nfldata[nfldata$home_team == nfldata$posteam,]
+
+#Sort by game ID so TOP is binded on correctly
+nfldata2 <- nfldata2[order(nfldata2$game_id),]
+
+nfldata3 <- cbind(nfldata2, TO_f2, pen2[,4], Pen_Type2[,4])
+
+#Create binary home win or loss
+nfldata4 <- nfldata3 %>% 
+  mutate(Home_Win = ifelse(result > 0, 1, 0))
+
+#Change Start_time to numeric to be factored into 3 levels
+nfldata4$start_time <- sapply(strsplit(nfldata4$start_time,":"),
+                                       function(x) {
+                                         x <- as.numeric(x)
+                                         x[1]+x[2]/24+x[3]/1440
+                                       }
+)
+
+nfldata5 <- nfldata4 %>% 
+  mutate(game_time = ifelse(start_time <= 15, "noon", 
+                            ifelse(start_time >= 18, "night", "afternoon")), 
+         .keep = "unused")
+
+nfldata6 <- nfldata5 %>% 
+  mutate(thirds = third_con + third_fail,
+         fourths = fourth_con + fourth_fail)
+
+"/" <- function(x,y) ifelse(y==0,0,base:::"/"(x,y))
+nfldata7 <- nfldata6 %>% 
+  mutate(third_con_rate = round(third_con / thirds, 2),
+         fourth_con_rate = round(fourth_con / fourths, 2))
+
+
+
+#END OF DATA CLEANING
+
+modeldata <- nfldata7[, c(2:6, 10:11, 16:20, 23:24)]
+
+NAs <- modeldata[!complete.cases(modeldata), ]
+
+
+write.csv(modeldata, "NFL_model_data.csv")
+```
+
+```{r, include=FALSE, warning=FALSE}
+#load the data
+
+data <- read.csv("NFL_model_data.csv") %>% 
+  select(-X) %>% 
+  filter(TOP != 0)
+
+#summary(data)
+
+#cor(data[,9], data[,10])
+#Not a strong correlation so may be a weak instrument
+```
+
+### Introduction  
+
+The purpose of this report is to determine the probability an NFL team will win at home based on statistics from the games played from 2010 to 2019. In the NFL data we pulled, there were over 300 statistics that contained information from the play by play of all 2,670 games, and we used the data from various areas of the game to extract time of possession, penalty yards, turnovers, and third down conversions rates. We can analyze the relationship between a home team's time of possession, turnovers, turnovers forced, penalty yards, and third down conversion rate to predict their probability of winning at home. By using these extractions, we can create a model to predict whether teams will win at home and what impacts a win at home.
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, out.width="65%", fig.align='center'}
+winlosecounts <- data %>% 
+group_by(home_team, Home_Win) %>% 
+  count()
+
+wincounts <- data %>% 
+  group_by(home_team, Home_Win) %>% 
+  count() %>% 
+  filter(Home_Win == 1)
+
+losecounts <- data %>% 
+  group_by(home_team, Home_Win) %>% 
+  count() %>% 
+  filter(Home_Win == 0)
+
+colnames(wincounts) <- c("Team", "Home", "Wins")
+colnames(losecounts) <- c("Team1", "Home", "Losses")
+combinedWL <- cbind(wincounts, losecounts)
+
+combinedWLOUT <- combinedWL[,c(1,3,6)] %>% 
+  mutate(diff = Wins - Losses) %>% 
+  filter(diff < -3 | diff > 15)
+
+
+ggplot(combinedWLOUT, aes(x = Team, y = diff, fill = ifelse(diff > 0, "green", "red"))) +
+  geom_bar(stat = "identity") +
+  labs(title = "Largest Differences in Wins vs Losses at Home") +
+  ylab("Home Wins - Home Losses") +
+  scale_fill_identity(guide = FALSE)
+```
+
+For the graph above, we aggregated all of the home wins and subtracted all of the home losses away for each team. We see that some teams won several more games at home than lost but some teams actually lost a lot more games at home than won. Seems like New England, Green Bay, and Baltimore have an advantage at home while Cleveland, Tampa Bay, and Washington have a weak home field advantage. 
+
+---
+
+Our goal was to be able to build a model that with given inputs, will shoot out a probability that a team will win at home. The idea is, to find money lines from sports books that pay out higher than the lower bound of our 95% prediction interval. This way, if our model is accurate, in the long run, we will be making money on our bets because the casino is setting the money lines lower than our projected probability of a win. Casinos usually set their initial odds at what they think will happen in the game, and then while bettors start placing bets on either side, the casino has to tinker with the odds to produce the closest amount of money on each side. They do not care about having the closest line to the actual score but rather having equivalent amounts of money on both sides of the bet to maximize their profit. So, when we see games that start to produce moneylines with higher payout probabilities than our prediction models, we will want to target those games because we are confident that we will make money. There is always the chance that the lower probability team does end up winning, but in the long run we will be profitable due to choosing lines where the probability is lower than our 95% prediction interval lower bound. 
+
+For example, say we have the Dallas Cowboys playing at home against the New York Giants. The casino places the moneyline for the Cowboys at -165, which means we will be paid out our wager plus our wager divided by 1.65. Meaning that if our prediction interval lower bound from our model says the Cowboys will win by a probability of over 62.3%. We should place that bet because in the long run, we will be profiting money from these wagers. So now, we will get into how we created the model for predicting the probability a home team will win the game. 
+
+---
+
+
+
+```{r, message=FALSE, warning=FALSE, eval=FALSE, include=FALSE}
+instrument <- lm(Pen_Yards ~ UnDisc_Pen, data = data)
+summary(instrument)
+xbar <- round(predict(instrument),0)
+
+data <- read.csv("NFL_model_data.csv") %>% 
+  select(-X)
+data <- cbind(data[,c(-9,-10)], "Pen_Yards_hat" = xbar)
+```
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+mod5 <- glm(Home_Win ~ TOP + Pen_Yards + TO + TO_Forced +
+              third_con_rate + home_team, 
+            family = "binomial", data = data)
+#summary(mod5)
+
+topmod <- mod5
+```
+
+### Logistic Regression Equation  
+
+We decided to use a Logistic Regression model to predict the probability of a home team winning the game. To predict the probability of a home team winning, we need independent variables that we believe have an impact on whether the home team wins. For those independent variables, we decided to have home team's time of possession, accrued penalty yards, turnovers, turnovers forced, 3rd down conversion rate, and which home team itself out of the 32 different options in the NFL. After running those impactful statistics through the model, we received this model equation to predict probabilities. 
+
+$$
+\begin{aligned}
+\log\left[\frac{p}{1-p}\right] = -5.97 + 0.22*TOP - 0.01*Pen Yards - 0.72*TO + 0.37*TO Forced \\
++ 2.57*ThirdConRate - 0.65ATL + ... - 1.04* WAS
+\end{aligned}
+$$
+
+So, interpreting the numbers above, the numbers attached to the variable name correspond to the change in the log odds of the probability of winning when there is a one unit increase in that variable. For a first-hand example below, the Arizona Cardinals are our baseline group when not designating a specific team. So, the probability of the Arizona Cardinals winning at home, assigning each other statistic to the NFL average, is 64%. To see the change in probabilities when changing teams, refer to the table below. We see that when changing the home team to these 11 different NFL teams (which are drastic from the graph above), we can see the marginal effect of each team since we are assigning the other independent variables to the league average consistently.
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='left', out.width="50%"}
+column_avg <- as.data.frame(colMeans(data[,c(6:9,13:14)])) %>% t()
+predDataTEAM <- data.frame("TOP" = column_avg[1,"TOP"],
+                       "Pen_Yards" = column_avg[1,"Pen_Yards"],
+                       "TO" = column_avg[1,"TO"],
+                       "TO_Forced" = column_avg[1,"TO_Forced"],
+                       "third_con_rate" = column_avg[1,5],
+                       "home_team" = c("BAL", "CLE", "DEN", "GB",
+                                       "JAX", "KC", "NE", "PIT", 
+                                       "SEA", "TB", "WAS"),
+                       "away_team" = c("ARI"))
+
+#Differences in teams at home of Arizona, Atlanta, Baltimore
+TEAMTABLE <- data.frame("Probability" = predict(topmod, predDataTEAM, type = "response"))
+
+TEAMTABLE <- cbind(round(TEAMTABLE, 2), "ARI" = .64) %>% 
+  mutate(Change = Probability - ARI) %>% 
+  t() %>% as.data.frame() 
+
+TEAMTABLE <- TEAMTABLE[-2,]
+colnames(TEAMTABLE) <- predDataTEAM[,6]
+row.names(TEAMTABLE) <- c("Probability", "Change from Baseline")
+
+TEAMTABLE %>%
+  kbl(caption = "Probabilities of Winning at Home given League Averages") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+So, after looking at how changing solely the home team that is playing while keeping the other independent variables consistent, we can see large impacts of some teams in the NFL. Now, when looking through different sports books, keep an eye on the teams playing at home that have a high probability of winning but also keep an eye on the teams playing at home that have a low probability because we can either bet for or against the home team.
+
+Now, let's switch gears to look at the marginal effects of a team's turnovers. How will the probability of a home team winning change when their number of turnovers goes from 0 to 1 to 2 all the way up to 4? Well, when holding the team, and other independent variables constant, we can see that the probability continually drops the more turnovers the home team has to eventually dropping below the 50% mark when over 2.
+
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, eval=FALSE}
+predDataAWAYTEAM <- data.frame("TOP" = column_avg[1,"TOP"],
+                       "Pen_Yards" = column_avg[1,"Pen_Yards"],
+                       "TO" = column_avg[1,"TO"],
+                       "TO_Forced" = column_avg[1,"TO_Forced"],
+                       "third_con_rate" = column_avg[1,5],
+                       "home_team" = c("ARI"),
+                       "away_team" = c("BAL", "CLE", "DEN", "GB", "HOU",
+                                       "IND", "JAX", "KC", "LV", "MIN", 
+                                       "NE", "NO", "PIT", "SEA", "TB", 
+                                       "TEN", "WAS"))
+
+#Differences in teams at home of Arizona, Atlanta, Baltimore
+AWAYTEAMTABLE <- data.frame(predict(topmod, predDataAWAYTEAM, type = "response")) %>% 
+  t()
+colnames(AWAYTEAMTABLE) <- predDataAWAYTEAM[,7]
+row.names(AWAYTEAMTABLE) <- " "
+AWAYTEAMTABLE <- round(AWAYTEAMTABLE, 2)
+
+
+AWAYTEAMTABLE %>%
+  kbl(caption = "Probabilities of Winning at Home against this Opponents", align = "ccccccccccccccccc") %>%
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center', eval=FALSE}
+predData3rd <- data.frame("TOP" = column_avg[1,"TOP"],
+                          "Pen_Yards" = column_avg[1,"Pen_Yards"],
+                          "TO" = column_avg[1,"TO"],
+                          "TO_Forced" = column_avg[1,"TO_Forced"],
+                          "third_con_rate" = c(.29, round(column_avg[1,5], 2), .5, .75, 1),
+                          "home_team" = c("ARI"))
+
+
+#Differences in home win percentage looking at 1qr, mean, 3qr of 3rd
+#Conversion Rate
+THIRDTABLE <- data.frame(predict(topmod, predData3rd, type = "response")) %>% 
+  t()
+colnames(THIRDTABLE) <- predData3rd[,5]
+row.names(THIRDTABLE) <- "Probability"
+THIRDTABLE <- round(THIRDTABLE, 2)
+
+
+THIRDTABLE %>%
+  kbl(caption = "Probability a Team Wins at Home while changing 3rd Down Conversion Rate") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center', eval=FALSE}
+predDataTOP <- data.frame("TOP" = c(25, 27.53, round(column_avg[1,"TOP"], 2), 33.77, 35),
+                          "Pen_Yards" = column_avg[1,"Pen_Yards"],
+                          "TO" = column_avg[1,"TO"],
+                          "TO_Forced" = column_avg[1,"TO_Forced"],
+                          "third_con_rate" = column_avg[1,5],
+                          "home_team" = c("ARI"))
+
+
+#Differences in home win percentage looking at 1qr, mean, 3qr of TOP
+TOPTABLE <- data.frame(predict(topmod, predDataTOP, type = "response")) %>% 
+  t()
+colnames(TOPTABLE) <- predDataTOP[,1]
+row.names(TOPTABLE) <- "Probability"
+TOPTABLE <- round(TOPTABLE, 2)
+
+
+TOPTABLE %>%
+  kbl(caption = "Probability a Team Wins at Home while changing Time of Possession") %>%
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center'}
+predDataTO <- data.frame("TOP" = column_avg[1,"TOP"],
+                          "Pen_Yards" = column_avg[1,"Pen_Yards"],
+                          "TO" = c(0, 1, round(column_avg[1,"TO"], 0), 3, 4),
+                          "TO_Forced" = column_avg[1,"TO_Forced"],
+                          "third_con_rate" = column_avg[1,5],
+                          "home_team" = c("ARI"))
+
+
+#Differences in home win percentage looking at 1qr, mean, 3qr of TO
+TOTABLE <- data.frame(predict(topmod, predDataTO, type = "response")) %>% 
+  t()
+colnames(TOTABLE) <- predDataTO[,3]
+row.names(TOTABLE) <- "Probability"
+TOTABLE <- round(TOTABLE, 2)
+
+
+TOTABLE %>%
+  kbl(caption = "Probability a Team Wins at Home while changing Turnovers") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+Since we looked at a team’s turnovers, we thought we should also look at their ability to force turnovers. We should see that as forced turnovers increase, the probability that the home team wins will increase. 
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center'}
+predDataTOF <- data.frame("TOP" = column_avg[1,"TOP"],
+                         "Pen_Yards" = column_avg[1,"Pen_Yards"],
+                         "TO" = column_avg[1,"TO"],
+                         "TO_Forced" = c(0, 1, round(column_avg[1,"TO_Forced"], 0), 3, 4),
+                         "third_con_rate" = column_avg[1,5],
+                         "home_team" = c("ARI"))
+
+
+#Differences in home win percentage looking at 1qr, mean, 3qr of TOF
+TOFTABLE <- data.frame(predict(topmod, predDataTOF, type = "response")) %>% 
+  t()
+colnames(TOFTABLE) <- predDataTOF[,4]
+row.names(TOFTABLE) <- "Probability"
+TOFTABLE <- round(TOFTABLE, 2)
+
+
+TOFTABLE %>%
+  kbl(caption = "Probability a Team Wins at Home while changing Turnovers Forced") %>%
+  kable_styling(latex_options = "HOLD_position")
+```
+
+Our results confirm our hypothesis because each additional turnover forced leads to a significant increase in the probability of a team winning at home.  When the home team goes from forcing 1 turnover to forcing 2, the home team’s probability of winning is increased by 9%. This would lead to us looking for the teams who are averaging more forced turnovers per game when deciding which teams to bet on. We should look for matchups that have a large difference in average turnovers per game. 
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, fig.align='center', eval=FALSE}
+predDataPEN <- data.frame("TOP" = column_avg[1,"TOP"],
+                          "Pen_Yards" = c(0, 35, round(column_avg[1,"Pen_Yards"], 2), 74),
+                          "TO" = column_avg[1,"TO"],
+                          "TO_Forced" = column_avg[1,"TO_Forced"],
+                          "third_con_rate" = column_avg[1,5],
+                          "home_team" = c("ARI"))
+
+
+#Differences in home win percentage looking at 1qr, mean, 3qr of TOF
+PENTABLE <- data.frame(predict(topmod, predDataPEN, type = "response")) %>% 
+  t()
+colnames(PENTABLE) <- predDataPEN[,2]
+row.names(PENTABLE) <- "Probability"
+PENTABLE <- round(PENTABLE, 2)
+
+
+PENTABLE %>%
+  kbl(caption = "Probability a Team Wins at Home while changing Penalty Yards") %>%
+  kable_classic(full_width = T, html_font = "Cambria")
+```
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+logos <- teams_colors_logos[-c(19, 27, 30, 33),12]
+
+avgTOP <- data %>% 
+  group_by(home_team) %>% 
+  summarize(TOP = mean(TOP))
+
+avgTO <- data %>% 
+  group_by(home_team) %>% 
+  summarize(TO = mean(TO))
+
+avgTOF <- data %>% 
+  group_by(home_team) %>% 
+  summarize(TO_Forced = mean(TO_Forced))
+
+avgPEN <- data %>% 
+  group_by(home_team) %>% 
+  summarize(Pen_Yards = mean(Pen_Yards))
+
+avg3rd <- data %>% 
+  group_by(home_team) %>% 
+  summarize(third_con_rate = mean(third_con_rate))
+
+averages <- cbind(avgTOP, avgPEN[,2], avgTO[,2], avgTOF[,2], avg3rd[,2], logos)
+
+fullpredict <- data.frame(predict(topmod, averages[,-7], type = "response"))
+
+averagescomplete <- cbind(averages, fullpredict)
+
+colnames(averagescomplete) <- c("home_team", "TOP", "Pen_Yards", "TO", "TO_Forced",
+                                "third_con_rate","logo", "Probability")
+```
+
+```{r, include=FALSE, message=FALSE, warning=FALSE}
+teams <- averages[,1]
+
+newpred <- expandRows(column_avg, count=32, count.is.col=FALSE)
+rownames(newpred) <- 1:32
+
+TOPnewpred <- cbind(avgTOP, newpred[,-1])
+TOnewpred <- cbind(avgTO, newpred[,-2])
+TOFnewpred <- cbind(avgTOF, newpred[,-3])
+PENnewpred <- cbind(avgPEN, newpred[,-4])
+THIRDnewpred <- cbind(avg3rd, newpred[,-5])
+
+TOPfullpredict <- data.frame(predict(topmod, TOPnewpred, type = "response"))
+TOfullpredict <- data.frame(predict(topmod, TOnewpred, type = "response"))
+TOFfullpredict <- data.frame(predict(topmod, TOFnewpred, type = "response"))
+PENfullpredict <- data.frame(predict(topmod, PENnewpred, type = "response"))
+THIRDfullpredict <- data.frame(predict(topmod, THIRDnewpred , type = "response"))
+
+TOPaveragescomplete <- cbind(TOPnewpred[,-7], TOPfullpredict, logos)
+TOaveragescomplete <- cbind(TOnewpred[,-7], TOfullpredict, logos)
+TOFaveragescomplete <- cbind(TOFnewpred[,-7], TOFfullpredict, logos)
+PENaveragescomplete <- cbind(PENnewpred[,-7], PENfullpredict, logos)
+THIRDaveragescomplete <- cbind(THIRDnewpred[,-7], THIRDfullpredict, logos)
+
+colnames(TOPaveragescomplete) <- c("home_team", "TOP", "TO", "TO_Forced",
+                                   "Pen_Yards", "third_con_rate", "Probability", 
+                                   "logo")
+
+colnames(TOaveragescomplete) <- c("home_team", "TO", "TOP", "TO_Forced", "Pen_Yards", 
+                                  "third_con_rate", "Probability", "logo")
+
+colnames(TOFaveragescomplete) <- c("home_team", "TO_Forced", "TOP", "TO", "Pen_Yards", 
+                                "third_con_rate", "Probability", "logo")
+
+colnames(PENaveragescomplete) <- c("home_team", "Pen_Yards", "TOP", "TO", "TO_Forced",
+                                "third_con_rate", "Probability", "logo")
+
+colnames(THIRDaveragescomplete) <- c("home_team",
+                                "third_con_rate", "TOP", "TO", "TO_Forced", "Pen_Yards", 
+                                "Probability", "logo")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='75%', fig.align='center', eval=FALSE}
+TOPPLOT <- ggplot(averagescomplete, aes(x = TOP, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05, guide = FALSE)
+TOPPLOT
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='75%', fig.align='center', eval=FALSE}
+TOPPLOT2 <- ggplot(TOPaveragescomplete, aes(x = TOP, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05, guide = FALSE)
+TOPPLOT2
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='75%', fig.align='center', eval=FALSE}
+TOPLOT <- ggplot(averagescomplete, aes(x = TO, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05) + 
+  labs(title = str_wrap("Team's Average Turnovers vs Team's Probability of Winning from our Model", 50)) +
+  xlab("Turnovers") +
+  ylab("Probability of Winning")
+TOPLOT 
+```
+
+```{r ggplot2, echo=FALSE, message=FALSE, warning=FALSE, out.width='50%'}
+TOPLOT2 <- ggplot(TOaveragescomplete, aes(x = TO, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05) + 
+  labs(title = str_wrap("Team's Average Turnovers vs Team's Probability of Winning from our Model", 50)) +
+  xlab("Turnovers") +
+  ylab("Probability of Winning") +
+  xlim(c(1.5, 2.75)) +
+  ylim(c(.3,.9)) +
+  geom_hline(yintercept = .5, linetype = 'dashed') +
+  geom_vline(xintercept = column_avg[,"TO"], linetype = 'dashed')
+TOPLOT2 
+
+TOFPLOT2 <- ggplot(TOFaveragescomplete, aes(x = TO_Forced, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05) + 
+  labs(title = str_wrap("Team's Average Turnovers Forced vs Team's Probability of Winning from our Model", 50)) +
+  xlab("Turnovers Forced") +
+  ylab(" ") +
+  xlim(c(1.5, 2.75)) +
+  ylim(c(.3,.9)) +
+  geom_hline(yintercept = .5, linetype = 'dashed') +
+  geom_vline(xintercept = column_avg[,"TO_Forced"], linetype = 'dashed')
+TOFPLOT2
+```
+
+So, turning back to look at how turnovers and turnovers forced effect a home team's win percentage. We calculated each team's average amount of turnovers and turnovers forced per game from 2010 until 2019. Then using the league averages for all of the other independent variables, we created probabilities, by using our model, that the said home team would win their game given their average turnovers per game (left) and average turnovers forced per game (right) from the last 10 years. Then, we plotted all 32 NFL teams with their average turnovers and turnovers forced from the last 10 years on the x-axis with their probability of winning from our model on the y-axis.
+
+We see that there is clearly a negative relationship with turnovers and the probability of winning. So, we can conclude that teams turning the ball over will have less of a chance of winning their games at home. However, we do see that some teams with more than the league average of turnovers still have probabilities over 50% and the that Chargers have less than average turnovers but a less than 50% probability of winning at home. This may be because those teams average more or less turnovers forced than the league average. So, we want to make sure we monitor the average turnovers a team and opponent have been accruing and forcing when deciding whether the matchup is a good bet or not.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='75%', fig.align='center', eval=FALSE}
+TOFPLOT <- ggplot(averagescomplete, aes(x = TO_Forced, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05)
+TOFPLOT
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='75%', fig.align='center', eval=FALSE}
+PENPLOT <- ggplot(averagescomplete, aes(x = Pen_Yards, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05)
+PENPLOT
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='75%', fig.align='center', eval=FALSE}
+PENPLOT2 <- ggplot(PENaveragescomplete, aes(x = Pen_Yards, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05)
+PENPLOT2
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='75%', fig.align='center', eval=FALSE}
+THIRDPLOT <- ggplot(averagescomplete, aes(x = third_con_rate, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05) + 
+  labs(title = str_wrap("Team's Average 3rd Down Conversion Rate vs Team's Probability of Winning from our Model", 60))+
+  xlab("3rd Down Conversion Rate") +
+  ylab("Probability of Winning")
+THIRDPLOT
+```
+
+Now let us grasp the same concept above but instead of plugging in turnovers or turnovers forced, let us use the teams' average third down conversion rate from the last 10 years. This way, we will see how using the average third down conversion rate from team to team will impact the probability of winning at home. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, out.width='50%', fig.align='center'}
+THIRDPLOT2 <- ggplot(THIRDaveragescomplete, aes(x = third_con_rate, y = Probability)) +
+  geom_image(aes(image = logo), size = 0.05) + 
+  labs(title = str_wrap("Team's Average 3rd Down Conversion Rate vs Team's Probability of Winning from our Model", 60))+
+  xlab("3rd Down Conversion Rate") +
+  ylab("Probability of Winning") +
+  geom_hline(yintercept = .5, linetype = 'dashed') +
+  geom_vline(xintercept = column_avg[,"third_con_rate"], linetype = 'dashed')
+THIRDPLOT2
+```
+
+Using the graph above, it shows the general trend that as the percentage of successful 3rd down conversions increases for a given home team, that team’s probability of winning the game will also increase. So, when we are looking at teams or matchups to bet on, we will want to scan over their third down conversion rates in previous games to see how well they have been converting on third downs, along with how poorly the opposing team is converting on third down. 
+
+---
+
+### Endogeneity
+
+After running this model and finding the marginal effect of the variables on win percentage, we wondered if there were some factors that impacted home teams winning that we did not include. Does a team's discipline and football IQ impact a win or not? Does that even matter if they are home or away? So, we wanted to find some factor that we could use that would account for a team's discipline and IQ. We decided to create a new variable by counting the number of undisciplined penalties a team had in the game. Penalties included in the undisciplined count are as follows: Neutral Zone Infraction, Defensive Offsides, Delay of Game, False Start, Illegal Motion, Taunting, Unnecessary Roughness, Illegal Substitution, Illegal Shift, Unsportsmanlike Conduct, Defensive/Offensive Too Many Men on Field, and Encroachment. We then used the number of undisciplined penalties to predict the amount of penalty yards a team had in that game. Unfortunately, our model became weaker when we used the same independent variables to to predict win probability but traded out the predicted penalty yards instead of the true penalty yards. This most likely means that the number of undisciplined penalties in a game is not a good tool for estimation of the total penalty yards a team accrued in a game. Suppose we performed an experiment to see if a team is more disciplined at home or on the road. We could track the number of undisciplined penalties they average on the road and the average amount of undisciplined penalties at home, to see if teams produce more penalty yards at home or not. We would be able to see if teams are more disciplined at home, which results in less penalty yards at home, which would result in a higher probability of winning at home.
+
+### Conclusion
+
+So, after extracting full game data from the 2010-2019 NFL season play by plays, we were able to build a model to predict the probability of a home team winning at their stadium dependent on the home team's time of possession, turnovers, turnovers forced, penalty yards accrued, and third down conversion rate. The idea is to carry this model into the NFL season, input the season averages for the team's considered in a bet, calculate the 95% prediction interval probability that the home team will win, then if the odds payout the casino has placed has a lower probability than our lower bound of our 95% prediction interval based off the teams' statistics, we will place the bet. 
+
+As we continually seek out matchups that have moneyline odd probabilities lower than our desired probability to win, we should continually make profit because the probability of the home team winning is higher than the risk of placing that money on the home team for the resulting payout. 
