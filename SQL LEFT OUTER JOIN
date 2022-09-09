@@ -1,7 +1,8 @@
 ##Define a dataframe for the flight dataset at wasbs://downloads@smithbc.blob.core.windows.net/flights/flights.csv and the airport dataset at wasbs://downloads@smithbc.blob.core.windows.net/flights/airports.csv. Refer to previous labs to determine the schema for each of these files.
 
 from pyspark.sql.types import *
-##creating flight schema as 'a' table
+
+#creating flight schema for 'a' table
 flights_schema = StructType([
   StructField('month', IntegerType()),
   StructField('dayofmonth', IntegerType()),
@@ -37,7 +38,7 @@ flights = (
 flights.createOrReplaceTempView('flights')
 display(flights)
 
-##creating airport schema as 'b' table
+#creating airport schema for 'b' table
 airports_schema = StructType([
   StructField('code', StringType()),
   StructField('airport', StringType()),
@@ -61,7 +62,7 @@ airports.createOrReplaceTempView('airports')
 display(airports)
 
 
-##Using a SQL SELECT statement, identify the destination airports with the most arrivals (for the period represented by the flight dataset). Provide a friendly name for the destination airport.
+#Using a SQL SELECT statement, identify the destination airports with the most arrivals (for the period represented by the flight dataset). Provide a friendly name for the destination airport.
 %sql
 SELECT
   a.dest as airport_code,
@@ -72,3 +73,22 @@ LEFT OUTER JOIN airports b
   ON a.dest=b.code
 GROUP BY a.dest, b.airport
 ORDER BY arriving_flights DESC
+
+#Using the flights and airport dataframes defined in Scenario 1, identify the destination airports with the most arrivals (for the period represented by the flight dataset), providing a friendly name for the destination airport. This is the same query as Scenario 1 but the challenge is to generate the result set using the programmatic SQL API.
+#(Same as previous question)
+
+import pyspark.sql.functions as f
+
+results = (
+  flights
+    .groupby('dest')
+      .agg( f.count('*').alias('arriving_flights') ) 
+    .join( airports, flights.dest==airports.code, 'left_outer' )
+    .withColumnRenamed('dest', 'airport_code')
+    .withColumnRenamed('airport', 'airport_name')
+    .select( 'airport_code', 'airport_name', 'arriving_flights' )
+    .orderBy( 'arriving_flights', ascending=[0] )
+  )
+display(results)
+
+
